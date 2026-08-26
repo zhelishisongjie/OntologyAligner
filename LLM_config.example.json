@@ -1,0 +1,40 @@
+﻿{
+  "llm": {
+    "model": "your-reranking-model",
+    "max_concurrency": 10,
+    "base_url": "https://api.example.com/v1",
+    "api_key": "YOUR_API_KEY"
+  },
+  "llm2": {
+    "model": "your-second-reranking-model",
+    "max_concurrency": 10,
+    "base_url": "https://api.example.com/v1",
+    "api_key": "YOUR_API_KEY"
+  },
+  "embedding": {
+    "model": "text-embedding-3-large",
+    "max_concurrency": 10,
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "YOUR_API_KEY",
+    "dimensions": null
+  },
+  "embedding_small": {
+    "model": "text-embedding-3-small",
+    "max_concurrency": 10,
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "YOUR_API_KEY",
+    "dimensions": null
+  },
+  "deepseek-v4-flash": {
+    "model": "deepseek-v4-flash",
+    "max_concurrency": 10,
+    "base_url": "https://api.example.com/v1",
+    "api_key": "YOUR_API_KEY"
+  },
+  "deepseek-v4-pro": {
+    "model": "deepseek-v4-pro",
+    "max_concurrency": 10,
+    "base_url": "https://api.example.com/v1",
+    "api_key": "YOUR_API_KEY"
+  }
+}

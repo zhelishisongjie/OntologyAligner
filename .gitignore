@@ -1,0 +1,28 @@
+﻿# Local credentials
+LLM_config.json
+.env
+.env.*
+
+# Runtime artifacts
+.cache/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+results/
+outputs/
+chroma_db_*/
+model_resources/
+
+# Notebook and editor state
+.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# Local staging tools that are not part of OntologyAligner
+ImageGeneration/
+Reference Github README/
+
+# Generated logs and temporary files
+*.log
+*.tmp
+~$*

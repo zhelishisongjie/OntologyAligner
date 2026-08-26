@@ -1,0 +1,17 @@
+numpy==1.26.4
+chromadb==1.5.9
+faiss-cpu==1.15.0
+torch==2.7.0
+psutil==7.2.2
+nbclient==0.10.4
+nbformat==5.10.4
+openai==1.90.0
+openpyxl==3.1.5
+pandas==2.3.3
+matplotlib==3.10.5
+pytest==8.4.1
+scikit-learn==1.7.0
+scipy==1.16.1
+sentence-transformers==5.6.0
+transformers==5.12.0
+tqdm==4.67.1
