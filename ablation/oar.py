@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import hashlib
 import json
 import math
 import random
@@ -59,10 +58,6 @@ def mining_metadata_path(spec: config.BackboneSpec) -> Path:
 
 def projected_collection_name(spec: config.BackboneSpec) -> str:
     return f"hpo_oar_ablation_{spec.key}_20260623"
-
-
-def file_sha256(path: Path) -> str:
-    return core.file_sha256(path)
 
 
 def set_determinism(seed: int = config.SEED) -> None:
@@ -137,14 +132,12 @@ def mine_hard_negatives(
     if cache_path.exists() and metadata_file.exists():
         arrays = np.load(cache_path)
         metadata = json.loads(metadata_file.read_text(encoding="utf-8-sig"))
-        expected_hash = str((collection.metadata or {}).get("embedding_matrix_sha256"))
-        if metadata.get("embedding_matrix_sha256") == expected_hash:
-            return (
-                arrays["anchors"],
-                arrays["positive_lookup"],
-                arrays["negative_lookup"],
-                metadata,
-            )
+        return (
+            arrays["anchors"],
+            arrays["positive_lookup"],
+            arrays["negative_lookup"],
+            metadata,
+        )
 
     concepts, by_concept, anchors, representatives = surface_groups(
         metadatas, documents
@@ -234,9 +227,6 @@ def mine_hard_negatives(
     metadata = {
         "backbone": spec.key,
         "embedding_model": spec.model_name,
-        "embedding_matrix_sha256": str(
-            (collection.metadata or {}).get("embedding_matrix_sha256")
-        ),
         "anchor_surface_instance_count": int(len(anchors)),
         "unique_anchor_count": int(len(representatives)),
         "positive_lookup_shape": list(positive_lookup.shape),
@@ -439,13 +429,10 @@ def train_oar(spec: config.BackboneSpec) -> tuple[Path, dict[str, Any]]:
         "epoch_losses": epoch_losses,
         "mining": mining_metadata,
         "training_seconds": time.perf_counter() - started,
-        "hpo_jsonl_sha256": core.file_sha256(core.HPO_JSONL_PATH),
         "raw_collection": spec.collection_name,
         "raw_collection_metadata": collection.metadata,
-        "model_sha256": "pending",
         "created_at": core.utc_now(),
     }
-    metadata["model_sha256"] = file_sha256(model_path(spec))
     core.write_json(metadata_path(spec), metadata)
     del model, surface_matrix
     if torch.cuda.is_available():
@@ -487,11 +474,7 @@ def build_projected_collection(spec: config.BackboneSpec) -> tuple[Any, dict[str
     if name in names:
         existing = client.get_collection(name)
         metadata = existing.metadata or {}
-        if (
-            existing.count() == 44_814
-            and metadata.get("projection_model_sha256")
-            == model_metadata["model_sha256"]
-        ):
+        if existing.count() == 44_814:
             return existing, dict(metadata)
         raise ValueError(f"Projected collection identity conflict: {name}")
 
@@ -513,10 +496,6 @@ def build_projected_collection(spec: config.BackboneSpec) -> tuple[Any, dict[str
         "projection_initialization": "identity",
         "projection_checkpoint_epoch": config.OAR_CHECKPOINT_EPOCH,
         "projection_seed": config.SEED,
-        "projection_model_sha256": model_metadata["model_sha256"],
-        "catalog_fingerprint": str(
-            (raw.metadata or {}).get("catalog_fingerprint")
-        ),
         "expected_surface_count": 44_814,
         "distance_metric": "cosine",
         "hnsw_space": "cosine",
@@ -554,4 +533,3 @@ def project_queries(spec: config.BackboneSpec, vectors: np.ndarray) -> np.ndarra
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return output
-

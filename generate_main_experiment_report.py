@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import html
 import json
@@ -13,7 +13,6 @@ from run_main_experiment import (
     DATASET_ORDER,
     dataset_dir,
     experiment_dir,
-    experiment_manifest_path,
     llm_cache_dir,
 )
 
@@ -21,7 +20,6 @@ from run_main_experiment import (
 METHODS = ("OAR", "LCR", "OntologyAligner")
 RESULTS_DIR = experiment_dir()
 LLM_CACHE_DIR = llm_cache_dir()
-EXPERIMENT_MANIFEST = experiment_manifest_path()
 
 
 def pct(value: float) -> str:
@@ -75,9 +73,6 @@ def cache_usage(path: Path) -> dict[str, Any]:
 
 
 def build_summary() -> dict[str, Any]:
-    experiment_manifest = json.loads(
-        EXPERIMENT_MANIFEST.read_text(encoding="utf-8-sig")
-    )
     dataset_summaries: dict[str, Any] = {}
     all_records = {method: [] for method in METHODS}
     per_dataset_records: dict[str, dict[str, list[dict[str, Any]]]] = {}
@@ -144,7 +139,7 @@ def build_summary() -> dict[str, Any]:
 
     summary = {
         "generated_at": core.utc_now(),
-        "experiment_manifest": experiment_manifest,
+        "llm_model": str(core.load_config()["llm"]["model"]),
         "dataset_order": list(DATASET_ORDER),
         "dataset_summaries": dataset_summaries,
         "methods": methods,
@@ -226,7 +221,6 @@ def generate_html(summary: dict[str, Any]) -> str:
         "</tr>"
         for stage, usage in summary["api_usage"].items()
     )
-    prompt_hashes = summary["experiment_manifest"]["identity"]["prompt_hashes"]
     macro_delta = (
         methods["OntologyAligner"]["macro_top1"] - methods["LCR"]["macro_top1"]
     )
@@ -240,18 +234,17 @@ header{{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:28px;align-ite
 .hero{{display:grid;grid-template-columns:1.3fr .7fr;margin:28px 0;border:1px solid var(--ink);background:var(--surface)}}.hero-copy{{padding:28px}}.hero h2{{font:700 24px/1.3 Georgia,"Microsoft YaHei",serif;margin:0 0 8px}}.hero-number{{display:grid;place-content:center;text-align:center;border-left:1px solid var(--ink);background:var(--signal)}}.hero-number strong{{font:700 38px/1 Consolas,monospace;color:var(--teal)}}.hero-number span{{margin-top:9px;font-size:12px}}
 .metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--line);background:var(--surface)}}.metric{{padding:18px;border-right:1px solid var(--line)}}.metric:last-child{{border:0}}.metric span{{display:block;color:var(--muted);font-size:12px}}.metric strong{{display:block;margin-top:5px;font:700 25px/1.2 Consolas,monospace}}
 section{{margin-top:34px}}section h2{{margin:0 0 11px;font:700 19px/1.3 Georgia,"Microsoft YaHei",serif}}.table-wrap{{overflow:auto;border-top:2px solid var(--ink);border-bottom:1px solid var(--line);background:var(--surface)}}table{{width:100%;min-width:760px;border-collapse:collapse}}th,td{{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line)}}th{{font-size:12px;color:var(--muted);background:#ebe9e2}}tbody tr:last-child td{{border-bottom:0}}a{{color:var(--ink);text-decoration-thickness:1px;text-underline-offset:3px}}.positive{{color:var(--teal);font-weight:700}}.negative{{color:var(--rust);font-weight:700}}.neutral{{color:var(--muted);font-weight:700}}
-.audit{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}dl{{margin:0;border-top:2px solid var(--ink)}}dl div{{display:grid;grid-template-columns:1fr 1.4fr;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}}dt{{color:var(--muted)}}dd{{margin:0;font-family:Consolas,monospace;overflow-wrap:anywhere}}.note{{padding:15px 18px;border-left:4px solid var(--teal);background:#e5eeea;color:var(--ink)}}footer{{margin-top:38px;padding-top:15px;border-top:1px solid var(--ink);color:var(--muted);font-size:12px}}
+.note{{padding:15px 18px;border-left:4px solid var(--teal);background:#e5eeea;color:var(--ink)}}footer{{margin-top:38px;padding-top:15px;border-top:1px solid var(--ink);color:var(--muted);font-size:12px}}
 @media(max-width:760px){{main{{padding:20px 12px 40px}}header{{grid-template-columns:1fr;gap:16px}}.stamp{{text-align:left}}h1{{font-size:29px}}.hero{{grid-template-columns:1fr}}.hero-copy{{padding:22px 18px}}.hero-number{{border-left:0;border-top:1px solid var(--ink);padding:22px}}.metrics{{grid-template-columns:1fr 1fr}}.metric:nth-child(2){{border-right:0}}.metric:nth-child(-n+2){{border-bottom:1px solid var(--line)}}.audit{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<header><div><div class="eyebrow">MAIN EXPERIMENT / FROZEN PIPELINE</div><h1>OntologyAligner<br>七数据集主实验</h1><p>OAR → LCR → HGR · 全量样本 · 独立正式 LLM 缓存</p></div><div class="stamp">7 datasets / {methods['OntologyAligner']['rows']:,} rows<br>HPO 2026-06-23 / Top-20</div></header>
+<header><div><div class="eyebrow">MAIN EXPERIMENT</div><h1>OntologyAligner<br>七数据集主实验</h1><p>OAR → LCR → HGR · 全量样本</p></div><div class="stamp">7 datasets / {methods['OntologyAligner']['rows']:,} rows<br>HPO 2026-06-23 / Top-20</div></header>
 <div class="hero"><div class="hero-copy"><h2>完整流程 Macro Top-1</h2><p>七个数据集等权平均；Micro Top-1 为 {pct(methods['OntologyAligner']['micro_top1'])}。</p></div><div class="hero-number"><strong>{pct(methods['OntologyAligner']['macro_top1'])}</strong><span>OntologyAligner</span></div></div>
 <div class="metrics"><div class="metric"><span>样本总数</span><strong>{methods['OntologyAligner']['rows']:,}</strong></div><div class="metric"><span>OAR Macro</span><strong>{pct(methods['OAR']['macro_top1'])}</strong></div><div class="metric"><span>LCR Macro</span><strong>{pct(methods['LCR']['macro_top1'])}</strong></div><div class="metric"><span>HGR Macro Δ</span><strong class="{'positive' if macro_delta > 0 else 'negative' if macro_delta < 0 else 'neutral'}">{macro_delta * 100:+.2f} pp</strong></div></div>
 <section><h2>逐数据集 Top-1</h2><div class="table-wrap"><table><thead><tr><th>数据集</th><th>样本</th><th>OAR</th><th>LCR</th><th>OntologyAligner</th><th>HGR Δ</th><th>改对 / 改错</th></tr></thead><tbody>{dataset_rows}</tbody></table></div></section>
 <section><h2>HGR 总体行为</h2><div class="table-wrap"><table><thead><tr><th>触发样本</th><th>触发率</th><th>改变 Top-1</th><th>改对</th><th>改错</th><th>Macro 95% CI</th><th>McNemar p</th></tr></thead><tbody><tr><td>{hgr['triggered_samples']:,}</td><td>{pct(hgr['trigger_rate'])}</td><td>{hgr['changed_top1']:,}</td><td class="positive">{hgr['wrong_to_right']}</td><td class="negative">{hgr['right_to_wrong']}</td><td>[{comparison['bootstrap_95_ci'][0] * 100:+.2f}, {comparison['bootstrap_95_ci'][1] * 100:+.2f}] pp</td><td>{comparison['mcnemar_exact_p']:.4f}</td></tr></tbody></table></div></section>
 <section><h2>主实验 API 使用</h2><div class="table-wrap"><table><thead><tr><th>阶段</th><th>唯一请求</th><th>重试</th><th>Prompt tokens</th><th>Completion tokens</th><th>Total tokens</th></tr></thead><tbody>{usage_rows}</tbody></table></div></section>
-<section><h2>实验审计</h2><div class="audit"><dl><div><dt>LCR system</dt><dd>{prompt_hashes['lcr_system']}</dd></div><div><dt>LCR user template</dt><dd>{prompt_hashes['lcr_user_template']}</dd></div></dl><dl><div><dt>HGR system</dt><dd>{prompt_hashes['hgr_system']}</dd></div><div><dt>HGR user template</dt><dd>{prompt_hashes['hgr_user_template']}</dd></div></dl></div></section>
 <section><p class="note"><strong>口径：</strong>全部 13,390 行均参与评分，重复 mention 保留；相同 prompt 在本次主实验内部按 key 复用。LCR 的 No Match 作为有效未匹配预测保留，HGR 必须返回完整排序；没有 retrieval fallback。主指标为七数据集等权 Macro Top-1。</p></section>
-<footer>生成时间：{html.escape(summary['generated_at'])} · 模型：{html.escape(summary['experiment_manifest']['identity']['llm_model'])} · 结果目录：{html.escape(str(RESULTS_DIR))}</footer>
+<footer>生成时间：{html.escape(summary['generated_at'])} · 模型：{html.escape(summary['llm_model'])} · 结果目录：{html.escape(str(RESULTS_DIR))}</footer>
 </main></body></html>"""
 
 

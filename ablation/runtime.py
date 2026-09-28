@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -19,6 +18,8 @@ from transformers import AutoModel, AutoTokenizer
 
 import ontology_aligner_runtime as core
 
+from ontology_aligner_oar import hpo_surfaces
+
 from . import config
 
 
@@ -27,12 +28,14 @@ def safe_tag(value: str) -> str:
 
 
 def main_record_path(dataset: str, stage: str) -> Path:
+    from run_main_experiment import dataset_dir
+
     filename = {
         "oar": "oar_records.jsonl",
         "lcr": "lcr_records.jsonl",
         "final": "final_records.jsonl",
     }[stage]
-    return config.MAIN_RUN_DIR / config.MAIN_DATASET_KEYS[dataset] / filename
+    return dataset_dir(config.MAIN_DATASET_KEYS[dataset]) / filename
 
 
 def load_full_stage(stage: str) -> list[dict[str, Any]]:
@@ -138,9 +141,61 @@ def prefix_candidates(
 
 def raw_collection(spec: config.BackboneSpec) -> Any:
     client = chromadb.PersistentClient(path=str(config.RAW_CHROMA_PATH))
-    collection = client.get_collection(spec.collection_name)
+    names = {item.name if hasattr(item, "name") else str(item) for item in client.list_collections()}
+    if spec.collection_name in names:
+        collection = client.get_collection(spec.collection_name)
+    else:
+        collection = client.create_collection(
+            spec.collection_name,
+            metadata={
+                "embedding_model": spec.model_name,
+                "embedding_dimensions": spec.dimension,
+                "model_revision": spec.revision,
+                "pooling": spec.pooling,
+                "build_status": "building",
+            },
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+    surfaces = hpo_surfaces(core.load_ontology())
+    start = collection.count()
+    if start > len(surfaces):
+        raise ValueError(f"{spec.collection_name}: unexpected surface count")
+    if start < len(surfaces):
+        resolver = (
+            core.EmbeddingResolver(
+                core.load_config(),
+                config.ROOT / ".cache" / "oar_surface_embeddings.sqlite3",
+            )
+            if spec.key == "text_embedding_3_large" else None
+        )
+        backend = PinnedEmbeddingBackend(spec) if resolver is None else None
+        try:
+            for offset in range(start, len(surfaces), spec.batch_size):
+                batch = surfaces[offset : offset + spec.batch_size]
+                if resolver is not None:
+                    vectors, _ = resolver.resolve([item[0] for item in batch])
+                    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+                    vectors = vectors / np.maximum(norms, 1e-12)
+                else:
+                    vectors = backend.encode([item[0] for item in batch])
+                collection.add(
+                    ids=[f"surface_{offset + index:07d}" for index in range(len(batch))],
+                    documents=[item[0] for item in batch],
+                    metadatas=[
+                        {"hpo_id": item[1], "preferred_label": item[2], "surface_index": offset + index}
+                        for index, item in enumerate(batch)
+                    ],
+                    embeddings=vectors.tolist(),
+                )
+                print(f"{spec.key} raw index {offset + len(batch)}/{len(surfaces)}", flush=True)
+        finally:
+            if resolver is not None:
+                resolver.close()
+        metadata = dict(collection.metadata or {})
+        metadata["build_status"] = "complete"
+        collection.modify(metadata=metadata)
     metadata = collection.metadata or {}
-    if collection.count() != 44_814:
+    if collection.count() != len(surfaces):
         raise ValueError(f"{spec.collection_name}: unexpected surface count")
     if int(metadata.get("embedding_dimensions", 0)) != spec.dimension:
         raise ValueError(f"{spec.collection_name}: dimension metadata mismatch")
@@ -189,7 +244,7 @@ class QueryEmbeddingCache:
 
     @staticmethod
     def key(model: str, text: str) -> str:
-        return hashlib.sha256(f"{model}\0{text}".encode()).hexdigest()
+        return f"{model}\0{text}"
 
     def get(self, model: str, text: str, dimension: int) -> np.ndarray | None:
         row = self.connection.execute(
@@ -237,14 +292,14 @@ class PinnedEmbeddingBackend:
                 spec.model_name,
                 revision=spec.revision,
                 device=self.device,
-                local_files_only=True,
+                local_files_only=False,
             )
         elif spec.backend == "transformers_mean_pooling":
             self.tokenizer = AutoTokenizer.from_pretrained(
-                spec.model_name, revision=spec.revision, local_files_only=True
+                spec.model_name, revision=spec.revision, local_files_only=False
             )
             self.transformer = AutoModel.from_pretrained(
-                spec.model_name, revision=spec.revision, local_files_only=True
+                spec.model_name, revision=spec.revision, local_files_only=False
             ).to(self.device)
             self.transformer.eval()
         elif spec.backend != "openai":
@@ -325,31 +380,6 @@ def resolve_query_embeddings(
             missing.append(text)
         else:
             vectors[text] = vector
-    source_hits = 0
-    if spec.key == "text_embedding_3_large" and missing:
-        source = sqlite3.connect(
-            f"file:{core.SOURCE_EMBEDDING_CACHE}?mode=ro", uri=True
-        )
-        still_missing = []
-        for text in missing:
-            row = source.execute(
-                "SELECT vector, dimension FROM embeddings WHERE cache_key = ?",
-                (cache.key(spec.model_name, text),),
-            ).fetchone()
-            if row is None or int(row[1]) != spec.dimension:
-                still_missing.append(text)
-                continue
-            vector = np.frombuffer(row[0], dtype=np.float32).copy()
-            if vector.shape != (spec.dimension,):
-                still_missing.append(text)
-                continue
-            vectors[text] = vector
-            cache.put_many(
-                spec.model_name, [text], vector.reshape(1, -1), "main_embedding_cache"
-            )
-            source_hits += 1
-        source.close()
-        missing = still_missing
     generated = 0
     if missing:
         backend = PinnedEmbeddingBackend(spec)
@@ -365,8 +395,7 @@ def resolve_query_embeddings(
     return matrix, {
         "rows": len(values),
         "unique": len(unique),
-        "cache_hits": len(unique) - source_hits - generated,
-        "source_cache_hits": source_hits,
+        "cache_hits": len(unique) - generated,
         "generated": generated,
     }
 
@@ -386,17 +415,6 @@ def dynamic_prompt(template: str, candidate_k: int) -> str:
         .replace("all 20 candidates", f"all {candidate_k} candidates")
         .replace("20 candidate HPO", f"{candidate_k} candidate HPO")
     )
-
-
-def prompt_hashes(candidate_k: int) -> dict[str, str]:
-    lcr = dynamic_prompt(core.USER_PROMPT_TEMPLATE, candidate_k)
-    hgr = dynamic_prompt(core.HPO_GRAPH_RERANK_PROMPT, candidate_k)
-    return {
-        "lcr_system": hashlib.sha256(core.SYSTEM_PROMPT.encode()).hexdigest(),
-        "lcr_user_template": hashlib.sha256(lcr.encode()).hexdigest(),
-        "hgr_system": hashlib.sha256(core.HPO_GRAPH_SYSTEM_PROMPT.encode()).hexdigest(),
-        "hgr_user_template": hashlib.sha256(hgr.encode()).hexdigest(),
-    }
 
 
 def build_lcr_task(
@@ -420,12 +438,12 @@ def build_lcr_task(
         "model": model,
         "request_options": core.llm_request_options(model),
         "temperature": core.LLM_TEMPERATURE,
-        "system_prompt_sha256": hashlib.sha256(core.SYSTEM_PROMPT.encode()).hexdigest(),
-        "user_prompt_sha256": hashlib.sha256(user_prompt.encode()).hexdigest(),
+        "system_prompt": core.SYSTEM_PROMPT,
+        "user_prompt": user_prompt,
         "candidate_ids": candidate_ids,
     }
     return {
-        "key": core.stable_hash(identity),
+        "key": json.dumps(identity, ensure_ascii=False, sort_keys=True),
         "stage": stage,
         "model": model,
         "system_prompt": core.SYSTEM_PROMPT,
@@ -457,14 +475,12 @@ def build_hgr_task(
         "model": model,
         "request_options": core.llm_request_options(model),
         "temperature": core.LLM_TEMPERATURE,
-        "system_prompt_sha256": hashlib.sha256(
-            core.HPO_GRAPH_SYSTEM_PROMPT.encode()
-        ).hexdigest(),
-        "user_prompt_sha256": hashlib.sha256(user_prompt.encode()).hexdigest(),
+        "system_prompt": core.HPO_GRAPH_SYSTEM_PROMPT,
+        "user_prompt": user_prompt,
         "candidate_ids": candidate_ids,
     }
     return {
-        "key": core.stable_hash(identity),
+        "key": json.dumps(identity, ensure_ascii=False, sort_keys=True),
         "stage": stage,
         "model": model,
         "system_prompt": core.HPO_GRAPH_SYSTEM_PROMPT,

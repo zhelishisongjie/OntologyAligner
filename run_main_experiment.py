@@ -1,13 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any, Sequence
 
-import chromadb
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -21,7 +19,7 @@ from dataset_utils import (
     dataset_config,
     load_gold_labels,
 )
-from ontology_aligner_oar import load_default_oar_runtime
+from ontology_aligner_oar import ensure_oar_collection, load_default_oar_runtime
 
 
 ROOT = Path(__file__).resolve().parent
@@ -71,9 +69,7 @@ def precompute_workbook_path(dataset: str) -> Path:
 
 
 def experiment_key() -> str:
-    identity = experiment_identity()
-    identity_hash = core.stable_hash(identity)[:12]
-    return f"{safe_tag(str(identity['llm_model']))}_{identity_hash}"
+    return safe_tag(str(core.load_config()["llm"]["model"]))
 
 
 def experiment_dir() -> Path:
@@ -84,78 +80,8 @@ def llm_cache_dir() -> Path:
     return experiment_dir() / "llm_cache"
 
 
-def experiment_manifest_path() -> Path:
-    return experiment_dir() / "experiment_manifest.json"
-
-
 def dataset_dir(dataset: str) -> Path:
     return experiment_dir() / dataset
-
-
-def prompt_hashes() -> dict[str, str]:
-    return {
-        "lcr_system": hashlib.sha256(core.SYSTEM_PROMPT.encode()).hexdigest(),
-        "lcr_user_template": hashlib.sha256(
-            core.USER_PROMPT_TEMPLATE.encode()
-        ).hexdigest(),
-        "hgr_system": hashlib.sha256(
-            core.HPO_GRAPH_SYSTEM_PROMPT.encode()
-        ).hexdigest(),
-        "hgr_user_template": hashlib.sha256(
-            core.HPO_GRAPH_RERANK_PROMPT.encode()
-        ).hexdigest(),
-    }
-
-
-def experiment_identity() -> dict[str, Any]:
-    config = core.load_config()
-    runtime = load_default_oar_runtime(ROOT)
-    return {
-        "method": "OntologyAligner",
-        "pipeline": ["OAR", "LCR", "HGR"],
-        "llm_model": str(config["llm"]["model"]),
-        "temperature": core.LLM_TEMPERATURE,
-        "embedding_model": core.EMBEDDING_MODEL,
-        "retrieval_top_k": RETRIEVAL_TOP_K,
-        "candidate_count": core.LLM_CANDIDATE_COUNT,
-        "hgr_probe_top_k": core.HPO_GRAPH_PROBE_TOP_K,
-        "hgr_max_ancestor_distance": core.HPO_MAX_ANCESTOR_DISTANCE,
-        "max_attempts": core.MAX_ATTEMPTS,
-        "prompt_hashes": prompt_hashes(),
-        "hpo_jsonl_sha256": core.file_sha256(core.HPO_JSONL_PATH),
-        "hpo_graph_sha256": core.file_sha256(core.HPO_GRAPH_PATH),
-        "oar_run_id": runtime.run_id,
-        "oar_model_sha256": runtime.model_sha256,
-    }
-
-
-def ensure_experiment_manifest() -> dict[str, Any]:
-    manifest_path = experiment_manifest_path()
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    identity = experiment_identity()
-    if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        if existing["identity"] != identity:
-            raise RuntimeError(
-                "The frozen main-experiment identity changed; use a new result directory"
-            )
-        return existing
-    manifest = {
-        "created_at": core.utc_now(),
-        "identity": identity,
-        "rerank_notebook_sha256": core.file_sha256(core.RERANK_NOTEBOOK_PATH),
-        "datasets": list(DATASET_ORDER),
-        "llm_cache_policy": "new main-experiment cache; no ablation response reuse",
-        "deterministic_cache_policy": "reuse source embeddings and persistent OAR index",
-        "no_match_policy": "valid LCR response; HGR must return a complete ranking",
-        "rate_policy": [
-            {"requests_per_minute": 600, "max_concurrency": 30},
-            {"requests_per_minute": 300, "max_concurrency": 15},
-            {"requests_per_minute": 150, "max_concurrency": 8},
-        ],
-    }
-    core.write_json(manifest_path, manifest)
-    return manifest
 
 
 def load_samples(dataset: str) -> list[dict[str, Any]]:
@@ -390,7 +316,6 @@ def export_precompute_workbook(
     path.parent.mkdir(parents=True, exist_ok=True)
     terms = core.load_ontology()
     frame = build_precompute_frame(records, terms)
-    runtime = load_default_oar_runtime(ROOT)
     dataset_spec = dataset_config(dataset)
     run_config = {
         "dataset_key": notebook_dataset_key(dataset),
@@ -400,15 +325,12 @@ def export_precompute_workbook(
         "sample_count": len(frame),
         "ontology": "hpo",
         "ontology_release": "2026-06-23",
-        "ontology_sha256": core.file_sha256(core.HPO_JSONL_PATH),
         "embedding_backend": "openai",
         "embedding_model": core.EMBEDDING_MODEL,
         "embedding_dimensions": 3072,
         "retrieval_top_k": RETRIEVAL_TOP_K,
         "retrieval_method": "oar_dense_cosine",
         "oar_enabled": True,
-        "oar_run_id": runtime.run_id,
-        "oar_model_sha256": runtime.model_sha256,
         "dense_collection_name": core.OAR_COLLECTION_NAME,
         "source_runner": str(Path(__file__).name),
         "created_at": core.utc_now(),
@@ -434,16 +356,15 @@ def prepare_oar(dataset: str, samples: Sequence[dict[str, Any]]) -> list[dict[st
         return evaluate_records(dataset, records)
 
     config = core.load_config()
-    resolver = core.EmbeddingResolver(config, EMBEDDING_CACHE)
-    vectors, embedding_stats = resolver.resolve([sample["query"] for sample in samples])
-    resolver.local.close()
-    if resolver.source is not None:
-        resolver.source.close()
-
     runtime = load_default_oar_runtime(ROOT)
+    collection = ensure_oar_collection(ROOT, config, runtime)
+    resolver = core.EmbeddingResolver(config, EMBEDDING_CACHE)
+    try:
+        vectors, _ = resolver.resolve([sample["query"] for sample in samples])
+    finally:
+        resolver.close()
+
     projected = runtime.project(vectors)
-    client = chromadb.PersistentClient(path=str(core.OAR_CHROMA_PATH))
-    collection = client.get_collection(core.OAR_COLLECTION_NAME)
     candidates = core.retrieve_many(collection, projected, top_k=RETRIEVAL_TOP_K)
     records = core.retrieval_records(samples, candidates, "OAR")
     validate_oar_records(records, dataset, len(samples))
@@ -451,19 +372,6 @@ def prepare_oar(dataset: str, samples: Sequence[dict[str, Any]]) -> list[dict[st
     export_precompute_workbook(dataset, evaluated)
     output_dir = dataset_dir(dataset)
     core.write_jsonl(output_dir / "oar_records.jsonl", evaluated)
-    core.write_json(
-        output_dir / "oar_manifest.json",
-        {
-            "completed_at": core.utc_now(),
-            "dataset": dataset,
-            "dataset_sha256": core.file_sha256(dataset_config(dataset).workbook),
-            "samples": len(evaluated),
-            "embedding_stats": embedding_stats,
-            "oar_run_id": runtime.run_id,
-            "oar_model_sha256": runtime.model_sha256,
-            "collection": core.OAR_COLLECTION_NAME,
-        },
-    )
     return evaluated
 
 
@@ -705,30 +613,25 @@ def export_rerank_workbook(
     changed_top1 = graph_applied & (
         frame["initial_top1_id"] != frame["predicted_top1_id"]
     )
-    identity = experiment_identity()
     run_config = {
         "dataset_key": notebook_dataset_key(dataset),
         "sample_count": len(frame),
         "ontology": "hpo",
         "accepted_gold_policy": "candidate hits any ID in accepted_gold_ids_json",
         "precompute_path": str(precompute_path.resolve()),
-        "precompute_sha256": core.file_sha256(precompute_path),
         "embedding_model": core.EMBEDDING_MODEL,
         "oar_enabled": True,
-        "llm_model": identity["llm_model"],
+        "llm_model": str(core.load_config()["llm"]["model"]),
         "llm_temperature": core.LLM_TEMPERATURE,
         "llm_candidate_count": core.LLM_CANDIDATE_COUNT,
         "hpo_graph_rerank_enabled": True,
         "hpo_graph_path": str(core.HPO_GRAPH_PATH.resolve()),
-        "hpo_graph_sha256": core.file_sha256(core.HPO_GRAPH_PATH),
         "hpo_graph_probe_top_k": core.HPO_GRAPH_PROBE_TOP_K,
         "hpo_max_ancestor_distance": core.HPO_MAX_ANCESTOR_DISTANCE,
         "hpo_graph_trigger_rule": "dense_top1_disagrees_and_is_related_to_llm_top3",
         "graph_rerank_sample_count": int(graph_applied.sum()),
         "graph_changed_top1_count": int(changed_top1.sum()),
         "no_match_count": int((frame["prediction_status"] == "no_match").sum()),
-        "rerank_config_hash": experiment_key().rsplit("_", 1)[-1],
-        "rerank_config_identity": identity,
         "llm_max_concurrency": max_concurrency,
         "llm_requests_per_minute": requests_per_minute,
         "max_attempts": core.MAX_ATTEMPTS,
@@ -823,7 +726,6 @@ def finalize_dataset(
     summary = {
         "completed_at": core.utc_now(),
         "dataset": dataset,
-        "dataset_sha256": core.file_sha256(dataset_config(dataset).workbook),
         "methods": {
             "OAR": method_metrics(evaluated_oar),
             "LCR": method_metrics(evaluated_lcr),
@@ -857,7 +759,6 @@ def finalize_dataset(
             "max_concurrency": max_concurrency,
             "requests_per_minute": requests_per_minute,
         },
-        "prompt_hashes": prompt_hashes(),
         "precompute_workbook": str(precompute_workbook_path(dataset)),
         "rerank_workbook": str(rerank_path),
     }
@@ -871,7 +772,6 @@ def run_dataset(
     max_concurrency: int,
     requests_per_minute: int,
 ) -> dict[str, Any]:
-    ensure_experiment_manifest()
     samples = load_samples(dataset)
     print(f"{dataset}: samples={len(samples)}", flush=True)
     oar_records = prepare_oar(dataset, samples)
@@ -893,11 +793,13 @@ def run_dataset(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the frozen OntologyAligner main experiment by dataset"
+        description="Run OntologyAligner by dataset"
     )
     parser.add_argument(
-        "--dataset", choices=(*DATASET_CHOICES, "all"), required=True
+        "--dataset", choices=(*DATASET_CHOICES, "all")
     )
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--rebuild-index", action="store_true")
     parser.add_argument("--max-concurrency", type=int, default=30)
     parser.add_argument("--requests-per-minute", type=int, default=600)
     return parser.parse_args()
@@ -905,6 +807,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not args.prepare_only and args.dataset is None:
+        raise SystemExit("--dataset is required unless --prepare-only is set")
+    ensure_oar_collection(
+        ROOT, core.load_config(), load_default_oar_runtime(ROOT),
+        rebuild=args.rebuild_index,
+    )
+    if args.prepare_only:
+        return
     datasets = DATASET_ORDER if args.dataset == "all" else (args.dataset,)
     for dataset in datasets:
         run_dataset(dataset, args.max_concurrency, args.requests_per_minute)

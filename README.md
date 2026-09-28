@@ -53,7 +53,7 @@ This repository provides the official implementation and data release for:
 | --- | --- |
 | &#128451;&#65039; **PhenoNormBench** | Seven standardized HPO normalization datasets and a fixed 2,100-sample ablation subset. |
 | &#129516; **HPO snapshot** | OBO, JSON, and JSONL representations of the HPO release used by the workflow. |
-| &#127919; **OAR** | Trainable ontology-aligned projection, inference runtime, and vector-index construction code. |
+| &#127919; **OAR** | Trained projection weights in `models/oar_projection.pt`, inference runtime, and local vector-index construction code. |
 | &#129504; **LCR and HGR** | Complete prompts, response validation, checkpointing, and hierarchy-guided reranking logic. |
 | &#129514; **Experiments** | Main seven-dataset runner plus component and sensitivity ablations. |
 | &#128211; **Notebooks** | A two-step workflow for OAR precomputation followed by LCR and HGR. |
@@ -73,6 +73,7 @@ This repository provides the official implementation and data release for:
 |-- run_ablation.py                  # Ablation entry point
 |-- ontology_aligner_runtime.py      # Shared workflow runtime
 |-- ontology_aligner_oar.py          # Formal TE3L OAR inference
+|-- models/oar_projection.pt         # Trained OAR projection weights
 |-- dataset_utils.py                 # Dataset and HPO ID utilities
 |-- test_main_experiment_contract.py # Workflow contract tests
 |-- ablation/
@@ -139,7 +140,7 @@ conda activate ontologyaligner
 python -m pip install -r requirements.txt
 ```
 
-A CUDA-capable GPU is recommended for OAR training and local transformer backbones.
+A CUDA-capable GPU is recommended for the E5 ablation training and local transformer backbones. The main workflow uses the included OAR weights.
 
 ### 2. Configure API access
 
@@ -155,6 +156,7 @@ Copy-Item LLM_config.example.json LLM_config.json
 
 Set the model names, API endpoints, keys, and concurrency limits in `LLM_config.json`. The primary workflow reads `embedding` for TE3L embeddings and `llm` for LCR and HGR.
 
+
 ### 3. Choose a workflow
 
 | Workflow | Entry point | Purpose |
@@ -168,13 +170,21 @@ Set the model names, API endpoints, keys, and concurrency limits in `LLM_config.
 ### Notebook workflow
 
 1. Open `01_run_precompute.ipynb` and configure the dataset and embedding settings.
-2. Build the required HPO resources and generate OAR Top-20 candidate workbooks.
+2. Run the precompute cell. It creates the local OAR index when needed and generates the Top-20 candidate workbook.
 3. Open `02_run_LLM_rerank.ipynb` and configure the dataset and LLM settings.
 4. Run LCR and selective HGR to generate the final reranking workbooks.
 
-The complete LCR and HGR prompts live in `02_run_LLM_rerank.ipynb`. The command-line runtime reads those definitions directly, keeping both workflows synchronized.
+The complete LCR and HGR prompts live in `02_run_LLM_rerank.ipynb`. The command-line runtime reads those definitions directly, keeping both workflows synchronized. Both notebooks use the same Python workflow as the command-line runner.
 
 ### Command-line workflow
+
+Build or resume the local OAR index without running a dataset:
+
+```bash
+python run_main_experiment.py --prepare-only
+```
+
+Use `--rebuild-index` with this command when the local index needs to be rebuilt. This removes only the local OAR collection; its cached surface embeddings are reused.
 
 Run one dataset:
 
@@ -201,6 +211,8 @@ genereviews-10  id-68  gsc2017  gsc2024  csc  fgdd  bc8_t3
 ```
 
 ## Ablation Experiments
+
+The ablation runner uses the current LLM model's main-stage results and generates any missing datasets first. It also builds missing raw HPO indexes locally; E5 local backbones are downloaded on first use. Starting an ablation from a fresh clone can therefore run the full main benchmark and incur its API costs.
 
 | Experiment | Evaluation |
 | :---: | --- |
@@ -233,16 +245,7 @@ The contract tests cover the shared Top-20 workflow, dataset/workbook interfaces
 
 ## Citation
 
-The manuscript is currently under review. If you use OntologyAligner or PhenoNormBench, please cite:
-
-```bibtex
-@article{song2026ontologyaligner,
-  title   = {OntologyAligner: Ontology-Aligned Retrieval and Hierarchy-Guided Large Language Model Reranking for Biomedical Ontology Normalization},
-  author  = {Song, Jie and Xu, Zhichuan and Lu, Ziyu and Xiao, Meng and Bi, Cheng and Zhang, Yuxin and Zheng, Xin and Li, Xiaoran and Cao, Qiongfang and Yang, Hao and Shen, Bairong},
-  year    = {2026},
-  note    = {Manuscript under review}
-}
-```
+The manuscript is currently under review. 
 
 ## License
 

@@ -1,2 +1,1 @@
-﻿"""Frozen OntologyAligner ablation protocol v1."""
-
+﻿"""OntologyAligner ablation experiments."""

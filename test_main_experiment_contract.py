@@ -3,11 +3,14 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import run_main_experiment as main
+from ontology_aligner_oar import ensure_oar_collection, load_default_oar_runtime
 
 
 ROOT = Path(__file__).resolve().parent
@@ -35,16 +38,6 @@ def notebook_code(path: Path) -> str:
         for cell in notebook["cells"]
         if cell.get("cell_type") == "code"
     )
-
-
-def assigned_integer(code: str, name: str) -> int:
-    for node in ast.parse(code).body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if isinstance(target, ast.Name) and target.id == name:
-            return int(ast.literal_eval(node.value))
-    raise AssertionError(f"{name} was not assigned")
 
 
 def synthetic_records() -> tuple[dict, dict, dict]:
@@ -87,11 +80,93 @@ def test_notebooks_share_top20_contract() -> None:
     precompute_code = notebook_code(ROOT / "01_run_precompute.ipynb")
     rerank_code = notebook_code(ROOT / "02_run_LLM_rerank.ipynb")
 
-    assert assigned_integer(precompute_code, "RETRIEVAL_TOP_K") == 20
-    assert assigned_integer(rerank_code, "LLM_CANDIDATE_COUNT") == 20
-    assert "retrieval_top200" not in rerank_code
-    assert "Top-200" not in precompute_code
-    assert "Top-200" not in rerank_code
+    assert main.RETRIEVAL_TOP_K == main.core.LLM_CANDIDATE_COUNT == 20
+    assert "prepare_oar(DATASET_KEY, samples)" in precompute_code
+    assert "prepare_oar(DATASET_KEY, samples)" in rerank_code
+    assert "run_lcr(" in rerank_code and "run_hgr(" in rerank_code
+    assert "sha256" not in precompute_code + rerank_code
+
+
+def test_shipped_weight_loads_without_metadata() -> None:
+    runtime = load_default_oar_runtime(ROOT, device="cpu")
+    result = runtime.project(np.eye(2, 3072, dtype=np.float32))
+    assert result.shape == (2, 3072)
+    assert np.isfinite(result).all()
+
+
+def test_oar_index_builds_and_reuses_locally(tmp_path: Path, monkeypatch) -> None:
+    terms = {
+        "HP:1": main.core.OntologyTerm("HP:1", "first", ("one",), ""),
+        "HP:2": main.core.OntologyTerm("HP:2", "second", (), ""),
+    }
+    monkeypatch.setattr(main.core, "load_ontology", lambda: terms)
+    calls = []
+
+    class Resolver:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def resolve(self, texts):
+            calls.extend(texts)
+            vectors = np.zeros((len(texts), 3072), dtype=np.float32)
+            for index in range(len(texts)):
+                vectors[index, index] = 1
+            return vectors, {}
+
+    monkeypatch.setattr(main.core, "EmbeddingResolver", Resolver)
+    runtime = SimpleNamespace(project=lambda values: values)
+    first = ensure_oar_collection(tmp_path, {}, runtime)
+    second = ensure_oar_collection(tmp_path, {}, runtime)
+
+    assert first.count() == second.count() == 3
+    assert calls == ["first", "one", "second"]
+    assert second.get(ids=["surface_0000002"], include=["documents"])["documents"] == ["second"]
+
+
+def test_ablation_raw_index_builds_locally(tmp_path: Path, monkeypatch) -> None:
+    from ablation import config, runtime
+
+    terms = {"HP:1": main.core.OntologyTerm("HP:1", "first", ("one",), "")}
+    monkeypatch.setattr(main.core, "load_ontology", lambda: terms)
+    monkeypatch.setattr(config, "RAW_CHROMA_PATH", tmp_path / "raw_index")
+    spec = config.BackboneSpec(
+        "test", "test-model", "test_collection", "sentence_transformers",
+        "test-revision", "test-pooling", 3, 2,
+    )
+
+    class Backend:
+        def __init__(self, _spec):
+            pass
+
+        def encode(self, texts):
+            return np.eye(len(texts), 3, dtype=np.float32)
+
+    monkeypatch.setattr(runtime, "PinnedEmbeddingBackend", Backend)
+    first = runtime.raw_collection(spec)
+    second = runtime.raw_collection(spec)
+    assert first.count() == second.count() == 2
+
+
+def test_ablation_generates_missing_main_results(tmp_path: Path, monkeypatch) -> None:
+    from ablation import config, experiments, runtime
+
+    monkeypatch.setattr(config, "DATASET_ORDER", ("id-68",))
+    monkeypatch.setattr(main, "dataset_dir", lambda _dataset: tmp_path)
+    monkeypatch.setattr(runtime, "main_record_path", lambda _dataset, stage: tmp_path / stage)
+    calls = []
+    monkeypatch.setattr(main, "run_dataset", lambda *args: calls.append(args))
+
+    experiments.ensure_main_outputs()
+    assert len(calls) == 1 and calls[0][0] == "id-68"
+
+    (tmp_path / "summary.json").touch()
+    for stage in ("oar", "lcr", "final"):
+        (tmp_path / stage).touch()
+    experiments.ensure_main_outputs()
+    assert len(calls) == 1
 
 
 def test_runner_paths_match_notebook_names(tmp_path: Path, monkeypatch) -> None:

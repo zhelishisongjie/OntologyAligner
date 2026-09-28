@@ -1,7 +1,5 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -13,88 +11,35 @@ from torch.nn import functional as F
 
 OAR_INPUT_DIMENSION = 3072
 OAR_OUTPUT_DIMENSION = 3072
-DEFAULT_OAR_RESULT_DIR = Path("results/a1_3072_260623")
-DEFAULT_OAR_MODEL_PATH = DEFAULT_OAR_RESULT_DIR / "models/a1_best_top_1.pt"
-DEFAULT_OAR_METADATA_PATH = DEFAULT_OAR_RESULT_DIR / "models/a1_best_top_1.json"
+DEFAULT_OAR_MODEL_PATH = Path("models/oar_projection.pt")
 DEFAULT_OAR_CHROMA_PATH = Path("chroma_db_hpo_a1_260623")
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+OAR_COLLECTION_NAME = "hpo_a1_3072_top1_20260623"
+INDEX_BATCH_SIZE = 128
 
 
 class OARLinearProjection(nn.Module):
-    """Bias-free 3072-to-3072 metric projection used by OAR."""
-
     def __init__(self) -> None:
         super().__init__()
         self.projection = nn.Linear(
             OAR_INPUT_DIMENSION, OAR_OUTPUT_DIMENSION, bias=False
         )
-        with torch.no_grad():
-            self.projection.weight.copy_(torch.eye(OAR_INPUT_DIMENSION))
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.projection(embeddings), p=2, dim=-1)
 
 
 class OARRuntime:
-    def __init__(
-        self,
-        model_path: Path,
-        metadata_path: Path,
-        device: str | torch.device | None = None,
-    ) -> None:
+    def __init__(self, model_path: Path, device: str | torch.device | None = None) -> None:
         self.model_path = model_path.resolve()
-        self.metadata_path = metadata_path.resolve()
-        if not self.model_path.exists() or not self.metadata_path.exists():
-            raise FileNotFoundError(
-                "OAR model is missing; expected model and metadata under "
-                f"{self.model_path.parent}"
-            )
-        self.metadata = json.loads(
-            self.metadata_path.read_text(encoding="utf-8-sig")
-        )
-        self._validate_metadata()
+        if not self.model_path.is_file():
+            raise FileNotFoundError(f"OAR weights are missing: {self.model_path}")
         self.device = torch.device(
-            device
-            if device is not None
-            else ("cuda" if torch.cuda.is_available() else "cpu")
+            device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
         )
         self.model = OARLinearProjection().to(self.device)
         state = torch.load(self.model_path, map_location=self.device, weights_only=True)
-        state.pop("initial_projection", None)
         self.model.load_state_dict(state, strict=True)
         self.model.eval()
-
-    def _validate_metadata(self) -> None:
-        if self.metadata.get("family") != "A1":
-            raise ValueError("Configured model metadata is not compatible with OAR")
-        group = self.metadata.get("group") or {}
-        if int(group.get("output_dimension") or 0) != OAR_OUTPUT_DIMENSION:
-            raise ValueError("OAR output dimension must be 3072")
-        if self.metadata.get("identity", {}).get("initialization") != "identity":
-            raise ValueError("OAR projection must use identity initialization")
-        expected_hash = str(self.metadata.get("model_sha256") or "")
-        actual_hash = file_sha256(self.model_path)
-        if not expected_hash or actual_hash != expected_hash:
-            raise ValueError("OAR model SHA-256 does not match its metadata")
-
-    @property
-    def model_sha256(self) -> str:
-        return str(self.metadata["model_sha256"])
-
-    @property
-    def run_id(self) -> str:
-        return str(self.metadata["run_id"])
-
-    @property
-    def catalog_fingerprint(self) -> str:
-        return str(self.metadata["identity"]["catalog_fingerprint"])
 
     @torch.inference_mode()
     def project(
@@ -115,25 +60,79 @@ class OARRuntime:
             parts.append(self.model(batch).cpu().numpy())
         return np.vstack(parts) if parts else np.empty((0, OAR_OUTPUT_DIMENSION), np.float32)
 
-    def collection_metadata(self) -> dict[str, Any]:
-        return {
-            "projection_family": "A1",
-            "projection_run_id": self.run_id,
-            "projection_model_sha256": self.model_sha256,
-            "projection_input_dimension": OAR_INPUT_DIMENSION,
-            "projection_output_dimension": OAR_OUTPUT_DIMENSION,
-            "projection_bias": False,
-            "projection_initialization": "identity",
-            "catalog_fingerprint": self.catalog_fingerprint,
-            "hnsw_space": "cosine",
-            "distance_metric": "cosine",
-        }
-
 
 def load_default_oar_runtime(root: Path, device: str | None = None) -> OARRuntime:
-    """Load the trained OAR projection from its legacy artifact location."""
-    return OARRuntime(
-        root / DEFAULT_OAR_MODEL_PATH,
-        root / DEFAULT_OAR_METADATA_PATH,
-        device=device,
-    )
+    return OARRuntime(root / DEFAULT_OAR_MODEL_PATH, device=device)
+
+
+def hpo_surfaces(terms: dict[str, Any]) -> list[tuple[str, str, str, str]]:
+    surfaces: list[tuple[str, str, str, str]] = []
+    for term in terms.values():
+        seen: set[str] = set()
+        for text in (term.name, *term.synonyms):
+            surface = str(text).strip()
+            if surface and surface not in seen:
+                surfaces.append((surface, term.ontology_id, term.name, term.definition))
+                seen.add(surface)
+    return surfaces
+
+
+def ensure_oar_collection(
+    root: Path,
+    config: dict[str, Any],
+    runtime: OARRuntime,
+    rebuild: bool = False,
+) -> Any:
+    import chromadb
+    import ontology_aligner_runtime as core
+
+    surfaces = hpo_surfaces(core.load_ontology())
+    client = chromadb.PersistentClient(path=str(root / DEFAULT_OAR_CHROMA_PATH))
+    names = {item.name if hasattr(item, "name") else str(item) for item in client.list_collections()}
+    if rebuild and OAR_COLLECTION_NAME in names:
+        client.delete_collection(OAR_COLLECTION_NAME)
+        names.remove(OAR_COLLECTION_NAME)
+    if OAR_COLLECTION_NAME in names:
+        collection = client.get_collection(OAR_COLLECTION_NAME)
+        metadata = collection.metadata or {}
+        if metadata.get("embedding_model") != core.EMBEDDING_MODEL:
+            raise ValueError("Existing OAR index uses a different embedding model; rerun with --rebuild-index")
+        if collection.count() > len(surfaces):
+            raise ValueError("Existing OAR index has too many surfaces; rerun with --rebuild-index")
+    else:
+        collection = client.create_collection(
+            OAR_COLLECTION_NAME,
+            metadata={"embedding_model": core.EMBEDDING_MODEL, "build_status": "building"},
+            configuration={"hnsw": {"space": "cosine"}},
+        )
+    start = collection.count()
+    if start == len(surfaces):
+        if (collection.metadata or {}).get("build_status") != "complete":
+            collection.modify(metadata={"embedding_model": core.EMBEDDING_MODEL, "build_status": "complete"})
+        return collection
+    if start:
+        last_id = f"surface_{start - 1:07d}"
+        if not collection.get(ids=[last_id], include=[])["ids"]:
+            raise ValueError("OAR index cannot be resumed; rerun with --rebuild-index")
+
+    cache_path = root / ".cache" / "oar_surface_embeddings.sqlite3"
+    resolver = core.EmbeddingResolver(config, cache_path, source_cache=None)
+    try:
+        for offset in range(start, len(surfaces), INDEX_BATCH_SIZE):
+            batch = surfaces[offset : offset + INDEX_BATCH_SIZE]
+            vectors, _ = resolver.resolve([item[0] for item in batch])
+            projected = runtime.project(vectors)
+            collection.add(
+                ids=[f"surface_{offset + index:07d}" for index in range(len(batch))],
+                documents=[item[0] for item in batch],
+                metadatas=[
+                    {"hpo_id": item[1], "preferred_label": item[2], "surface_index": offset + index}
+                    for index, item in enumerate(batch)
+                ],
+                embeddings=projected.tolist(),
+            )
+            print(f"OAR index {offset + len(batch)}/{len(surfaces)}", flush=True)
+    finally:
+        resolver.close()
+    collection.modify(metadata={"embedding_model": core.EMBEDDING_MODEL, "build_status": "complete"})
+    return collection

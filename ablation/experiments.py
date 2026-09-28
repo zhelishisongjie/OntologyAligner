@@ -17,11 +17,8 @@ from . import config, oar, report, runtime
 
 def experiment_config() -> dict[str, Any]:
     settings = core.load_config()
-    manifest_path = config.MAIN_RUN_DIR / "experiment_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     values = {
         "protocol": "OntologyAligner Ablation v1",
-        "frozen_date": "2026-08-04",
         "seed": config.SEED,
         "full_sample_count": config.FULL_SAMPLE_COUNT,
         "subset_sample_count": config.SUBSET_SAMPLE_COUNT,
@@ -37,14 +34,6 @@ def experiment_config() -> dict[str, Any]:
         "temperature": core.LLM_TEMPERATURE,
         "hgr_probe_top_k": core.HPO_GRAPH_PROBE_TOP_K,
         "hgr_max_ancestor_distance": core.HPO_MAX_ANCESTOR_DISTANCE,
-        "hpo_jsonl_sha256": core.file_sha256(core.HPO_JSONL_PATH),
-        "hpo_graph_sha256": core.file_sha256(core.HPO_GRAPH_PATH),
-        "subset_sha256": core.file_sha256(config.SUBSET_PATH),
-        "main_experiment_identity": manifest["identity"],
-        "prompt_hashes_by_k": {
-            str(candidate_k): runtime.prompt_hashes(candidate_k)
-            for candidate_k in config.CANDIDATE_K_VALUES
-        },
         "oar_training": {
             "epochs": config.OAR_EPOCHS,
             "checkpoint_epoch": config.OAR_CHECKPOINT_EPOCH,
@@ -74,35 +63,21 @@ def ensure_config() -> dict[str, Any]:
     path = config.RESULTS_DIR / "experiment_config.json"
     values = experiment_config()
     if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8-sig"))
-        stable_keys = set(values) - {"created_at"}
-        if any(existing.get(key) != values.get(key) for key in stable_keys):
-            raise RuntimeError(
-                "Frozen ablation identity changed; use a new results version directory"
-            )
-        return existing
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     core.write_json(path, values)
     return values
 
 
-def load_frozen_config() -> dict[str, Any]:
-    path = config.RESULTS_DIR / "experiment_config.json"
-    if not path.exists():
-        return ensure_config()
-    frozen = json.loads(path.read_text(encoding="utf-8-sig"))
-    current_hashes = {
-        "hpo_jsonl_sha256": core.file_sha256(core.HPO_JSONL_PATH),
-        "hpo_graph_sha256": core.file_sha256(core.HPO_GRAPH_PATH),
-        "subset_sha256": core.file_sha256(config.SUBSET_PATH),
-    }
-    changed = {
-        key: (frozen.get(key), value)
-        for key, value in current_hashes.items()
-        if frozen.get(key) != value
-    }
-    if changed:
-        raise RuntimeError(f"Frozen ablation inputs changed: {changed}")
-    return frozen
+def ensure_main_outputs() -> None:
+    from run_main_experiment import dataset_dir, run_dataset
+
+    for dataset in config.DATASET_ORDER:
+        main_dataset = config.MAIN_DATASET_KEYS[dataset]
+        complete = (dataset_dir(main_dataset) / "summary.json").exists()
+        if complete and all(runtime.main_record_path(dataset, stage).exists() for stage in ("oar", "lcr", "final")):
+            continue
+        print(f"Preparing main experiment results for {main_dataset}", flush=True)
+        run_dataset(main_dataset, config.MAX_CONCURRENCY, config.REQUESTS_PER_MINUTE)
 
 
 def annotate(
@@ -158,17 +133,13 @@ def base_run_config(
     experiment: str,
     scope: str,
     rows: int,
-    use_frozen_inputs: bool = False,
 ) -> dict[str, Any]:
-    frozen = load_frozen_config() if use_frozen_inputs else ensure_config()
+    ensure_config()
     return {
         "experiment": experiment,
         "scope": scope,
         "rows": rows,
         "datasets": list(config.DATASET_ORDER),
-        "hpo_jsonl_sha256": frozen["hpo_jsonl_sha256"],
-        "hpo_graph_sha256": frozen["hpo_graph_sha256"],
-        "subset_sha256": frozen["subset_sha256"],
         "temperature": core.LLM_TEMPERATURE,
         "max_concurrency": config.MAX_CONCURRENCY,
         "requests_per_minute": config.REQUESTS_PER_MINUTE,
@@ -277,7 +248,6 @@ def run_e1() -> Path:
         {
             "definition": "Raw TE3L cosine -> Top-20 -> GPT LCR -> HGR",
             "llm_model": core.load_config()["llm"]["model"],
-            "prompt_hashes": runtime.prompt_hashes(20),
             "raw_collection": config.BACKBONE_BY_KEY[
                 "text_embedding_3_large"
             ].collection_name,
@@ -317,12 +287,10 @@ def run_e4(llm_backbone: str = "claude-opus-5") -> Path:
         candidate_k=20,
     )
     baseline = runtime.load_subset_stage("final")
-    use_frozen_inputs = llm_backbone != "claude-opus-5"
     run_config = base_run_config(
         "E4",
         "Ablation_Subset",
         len(records),
-        use_frozen_inputs=use_frozen_inputs,
     )
     run_config.update(
         {
@@ -330,7 +298,6 @@ def run_e4(llm_backbone: str = "claude-opus-5") -> Path:
             "llm_config_section": config_key,
             "llm_model": model,
             "llm_request_options": core.llm_request_options(model),
-            "prompt_hashes": runtime.prompt_hashes(20),
             "paired_comparisons": {
                 "OVERALL": paired(
                     baseline, records, f"GPT baseline -> {model} E4"
@@ -453,7 +420,6 @@ def run_e5(backbone: str = "all") -> Path:
             "backbones": [asdict(spec) for spec in config.BACKBONES],
             "oar_training": ensure_config()["oar_training"],
             "llm_model": core.load_config()["llm"]["model"],
-            "prompt_hashes": runtime.prompt_hashes(20),
             "paired_comparisons": comparisons,
         }
     )
@@ -499,10 +465,6 @@ def run_e6() -> Path:
             "definition": "OAR Top-20 ordered prefixes; K=1 derived, K=3/5/10 rerun, K=20 reused",
             "candidate_k_values": list(config.CANDIDATE_K_VALUES),
             "llm_model": core.load_config()["llm"]["model"],
-            "prompt_hashes_by_k": {
-                str(value): runtime.prompt_hashes(value)
-                for value in config.CANDIDATE_K_VALUES
-            },
             "paired_comparisons": comparisons,
         }
     )
@@ -518,10 +480,8 @@ def run_experiment(
     backbone: str = "all",
     llm_backbone: str = "claude-opus-5",
 ) -> Path:
-    if experiment == "E4" and llm_backbone != "claude-opus-5":
-        load_frozen_config()
-    else:
-        ensure_config()
+    ensure_main_outputs()
+    ensure_config()
     functions = {
         "E1": run_e1,
         "E2": run_e2,
@@ -534,6 +494,7 @@ def run_experiment(
 
 
 def run_all() -> list[Path]:
+    ensure_main_outputs()
     paths = [run_e2(), run_e3(), run_e1(), run_e4(), run_e5("all"), run_e6()]
     paths.append(generate_summary())
     return paths

@@ -9,7 +9,7 @@ from ablation import config, experiments
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the frozen OntologyAligner ablation protocol v1"
+        description="Run OntologyAligner ablation experiments"
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--experiment", choices=("E1", "E2", "E3", "E4", "E5", "E6"))

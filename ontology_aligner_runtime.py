@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import re
 import sqlite3
@@ -25,16 +24,9 @@ HPO_JSONL_PATH = ROOT / "HPO" / "hp260623.jsonl"
 HPO_GRAPH_PATH = ROOT / "HPO" / "hp260623.json"
 CONFIG_PATH = ROOT / "LLM_config.json"
 RERANK_NOTEBOOK_PATH = ROOT / "02_run_LLM_rerank.ipynb"
-OAR_CHROMA_PATH = ROOT / "chroma_db_hpo_a1_260623"
-OAR_COLLECTION_NAME = "hpo_a1_3072_top1_20260623"
-SOURCE_EMBEDDING_CACHE = (
-    ROOT
-    / ".cache"
-    / "comparison_method"
-    / "rag_hpo_te3l"
-    / "5f4f6b443f29e93b"
-    / "embedding_responses.sqlite3"
-)
+from ontology_aligner_oar import DEFAULT_OAR_CHROMA_PATH, OAR_COLLECTION_NAME
+
+OAR_CHROMA_PATH = ROOT / DEFAULT_OAR_CHROMA_PATH
 
 EMBEDDING_MODEL = "text-embedding-3-large"
 LLM_CANDIDATE_COUNT = 20
@@ -132,21 +124,6 @@ class GlobalRequestRateLimiter:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def stable_hash(payload: Any) -> str:
-    serialized = json.dumps(
-        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def load_config() -> dict[str, Any]:
@@ -376,7 +353,7 @@ class EmbeddingResolver:
         self,
         config: dict[str, Any],
         local_cache: Path,
-        source_cache: Path | None = SOURCE_EMBEDDING_CACHE,
+        source_cache: Path | None = None,
     ):
         local_cache.parent.mkdir(parents=True, exist_ok=True)
         self.local = sqlite3.connect(local_cache)
@@ -398,9 +375,17 @@ class EmbeddingResolver:
         if self.model != EMBEDDING_MODEL:
             raise ValueError(f"Expected {EMBEDDING_MODEL}, got {self.model}")
         self.dimension = 3072
+        self.client: OpenAI | None = None
+
+    def close(self) -> None:
+        self.local.close()
+        if self.source is not None:
+            self.source.close()
+        if self.client is not None:
+            self.client.close()
 
     def _key(self, text: str) -> str:
-        return hashlib.sha256(f"{self.model}\0{text}".encode()).hexdigest()
+        return f"{self.model}\0{text}"
 
     def _get(self, connection: sqlite3.Connection, text: str) -> np.ndarray | None:
         row = connection.execute(
@@ -435,13 +420,14 @@ class EmbeddingResolver:
                 missing.append(text)
         self.local.commit()
         if missing:
-            kwargs: dict[str, Any] = {"api_key": self.api_key, "max_retries": 3}
-            if self.base_url:
-                kwargs["base_url"] = self.base_url
-            client = OpenAI(**kwargs)
+            if self.client is None:
+                kwargs: dict[str, Any] = {"api_key": self.api_key, "max_retries": 3}
+                if self.base_url:
+                    kwargs["base_url"] = self.base_url
+                self.client = OpenAI(**kwargs)
             for start in range(0, len(missing), 128):
                 batch = missing[start : start + 128]
-                response = client.embeddings.create(model=self.model, input=batch)
+                response = self.client.embeddings.create(model=self.model, input=batch)
                 ordered = sorted(response.data, key=lambda item: item.index)
                 generated = np.asarray(
                     [item.embedding for item in ordered], dtype=np.float32
@@ -592,12 +578,12 @@ def build_lcr_task(
         "stage": stage,
         "model": model,
         "temperature": LLM_TEMPERATURE,
-        "system_prompt_sha256": hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest(),
-        "user_prompt_sha256": hashlib.sha256(user_prompt.encode()).hexdigest(),
+        "system_prompt": SYSTEM_PROMPT,
+        "user_prompt": user_prompt,
         "candidate_ids": candidate_ids,
     }
     return {
-        "key": stable_hash(identity),
+        "key": json.dumps(identity, ensure_ascii=False, sort_keys=True),
         "stage": stage,
         "model": model,
         "system_prompt": SYSTEM_PROMPT,
@@ -628,14 +614,12 @@ def build_hgr_task(
         "stage": stage,
         "model": model,
         "temperature": LLM_TEMPERATURE,
-        "system_prompt_sha256": hashlib.sha256(
-            HPO_GRAPH_SYSTEM_PROMPT.encode()
-        ).hexdigest(),
-        "user_prompt_sha256": hashlib.sha256(user_prompt.encode()).hexdigest(),
+        "system_prompt": HPO_GRAPH_SYSTEM_PROMPT,
+        "user_prompt": user_prompt,
         "candidate_ids": candidate_ids,
     }
     return {
-        "key": stable_hash(identity),
+        "key": json.dumps(identity, ensure_ascii=False, sort_keys=True),
         "stage": stage,
         "model": model,
         "system_prompt": HPO_GRAPH_SYSTEM_PROMPT,

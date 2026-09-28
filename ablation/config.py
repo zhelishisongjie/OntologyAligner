@@ -15,13 +15,6 @@ QUERY_EMBEDDING_CACHE = CACHE_DIR / "query_embeddings.sqlite3"
 SUBSET_PATH = ROOT / "Dataset" / "Ablation_Subset" / "ablation_subset_seed42.xlsx"
 RAW_CHROMA_PATH = ROOT / "chroma_db_hpo_260623"
 PROJECTED_CHROMA_PATH = ROOT / "chroma_db_hpo_oar_ablation_260623"
-MAIN_RUN_DIR = (
-    ROOT
-    / "results"
-    / "rerank"
-    / ".runs"
-    / "gpt-5.6-sol_cd8b26bab0b5"
-)
 
 DATASET_ORDER = (
     "genereviews-10",
