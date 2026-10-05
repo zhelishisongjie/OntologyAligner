@@ -106,6 +106,15 @@ This repository provides the official implementation and data release for:
 
 PhenoNormBench unifies seven HPO normalization datasets into a common mention-level format.
 
+PhenoNormBench is also available on [Hugging Face](https://huggingface.co/datasets/songjie0209/PhenoNormBench) and can be loaded as follows:
+```python
+from datasets import load_dataset
+
+dataset = load_dataset("songjie0209/PhenoNormBench")
+test = dataset["test"]
+fgdd = test.filter(lambda example: example["dataset"] == "FGDD")
+```
+
 | Dataset | Mentions | Workbook |
 | --- | ---: | --- |
 | GeneReviews-10 | 352 | `Dataset/GeneReviews-10/GeneReviews-10.xlsx` |
